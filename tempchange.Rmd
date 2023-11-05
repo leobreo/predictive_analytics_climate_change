@@ -1,0 +1,402 @@
+---
+title: "tempchange"
+output: html_document
+date: "2023-06-13"
+---
+
+```{r setup, include=FALSE}
+
+install.packages(c("dplyr", "ggplot2", "tsibble", "zoo"))
+install.packages("urca")
+install.packages("car")
+install.packages("strucchange","forecast")
+install.packages("cowplot")
+
+
+
+#library(zoo)
+
+library(TTR)
+library(forecast) 
+library(tseries)
+library(fpp3) 
+library(readxl) 
+library(lubridate)
+library(dplyr)
+library(ggplot2)
+library(tsibble)
+library(urca)
+library(car)
+library(strucchange)
+library(forecast) 
+library(cowplot)
+library(fable)
+library(fabletools)
+```
+
+```{r}
+data <- read.csv("tempchange.csv")
+
+data <- data %>%
+  mutate(Year.Month = paste0(Year.Month, "-01"))
+
+data <- data %>%
+  mutate(Month = yearmonth(Year.Month)) %>%
+  as_tsibble(index = Month) %>%
+  rename(change = Value)
+
+data$change <- as.numeric(data$change)
+```
+
+Guerrero
+
+```{r}
+#test guerro 
+data %>%
+  features(change, features=guerrero)
+```
+
+```{r}
+# Plot the data
+ggplot(data, aes(x = Month, y = change)) +
+  geom_line() +
+  ggtitle("Average surface temperature anomaly change in degrees Celcius") +
+  xlab("Date") +
+  ylab("Degrees Celcius compared to baseline period")
+
+data %>%
+  autoplot(box_cox(change, 0.9012359))
+```
+
+```{r}
+data %>% 
+  model(STL(change ~ trend() + season())) %>% 
+  components() %>% 
+  autoplot()
+```
+
+```{r}
+acf(data$change)
+pacf(data$change)
+```
+
+```{r}
+data20 <- data %>%
+  filter_index("2000 Jan" ~ "2022 Dec")
+
+data %>%
+  gg_season(change)
+  
+data20 %>%
+  gg_season(change)
+
+data20 %>%
+  gg_subseries(change)
+
+data %>%
+  gg_subseries(change)
+```
+
+# Unit Roots
+
+```{r}
+print("ADF with trend----------------------------------")
+summary(ur.df(data$change,type="trend", selectlags = "AIC", lags=36))
+print("ADF with drift----------------------------------")
+summary(ur.df(data$change,type="drift", selectlags = "AIC", lags=36))
+print("ADF with none----------------------------------")
+summary(ur.df(data$change,type="none", selectlags = "AIC", lags=36))
+print("KPSS with tau----------------------------------")
+summary(ur.kpss(data$change, type = "tau")) 
+print("KPSS with mu----------------------------------")
+summary(ur.kpss(data$change, type = "mu")) 
+```
+
+### Differencing
+
+```{r}
+# Take first difference
+data_dif <- data %>%
+  mutate(change_dif = change - lag(change))
+
+data_dif%>%
+  filter_index("1950 Jan" ~ .)%>%
+  autoplot(change_dif)
+
+mean_dif <- mean(data_dif$change_dif, na.rm = TRUE)
+
+plot1 <- data_dif %>%
+  filter_index("1950 Jan" ~ .) %>%
+  autoplot(change_dif) +
+  geom_hline(yintercept = mean_dif, color = "red", linetype = "dashed")+  ggtitle("Differences between lags")+
+  xlab("Date")
+
+plot2 <- ggplot(data, aes(x = Month, y = change)) +
+  geom_line() +
+  ggtitle("Average surface temperature anomaly change in degrees Celcius")+
+  xlab("Date")
+
+plot_grid(plot2, plot1, ncol=1)
+```
+
+```{r}
+data_dif <- data_dif %>%
+  slice(-1)
+```
+
+Test after differencing
+
+```{r}
+print("ADF with trend----------------------------------")
+summary(ur.df(data_dif$change_dif,type="trend", selectlags = "AIC", lags=36))
+print("ADF with drift----------------------------------")
+summary(ur.df(data_dif$change_dif,type="drift", selectlags = "AIC", lags=36))
+print("ADF with none----------------------------------")
+summary(ur.df(data_dif$change_dif,type="none", selectlags = "AIC", lags=36))
+print("KPSS with tau----------------------------------")
+summary(ur.kpss(data_dif$change_dif, type = "tau")) 
+print("KPSS with mu----------------------------------")
+summary(ur.kpss(data_dif$change_dif, type = "mu")) 
+```
+
+```{r}
+acf(data_dif$change_dif)
+pacf(data_dif$change_dif)
+```
+
+```{r}
+data_dif <- data_dif %>%
+  mutate(l1 = lag(change_dif),l12 = lag(change_dif,2))
+
+# QLR test
+qlr <- Fstats(change_dif ~ l1 +l12, data = as.ts(data_dif), from = 0.15)
+test <- sctest(qlr, type = "supF")
+test
+# Plot it
+plot.new()
+breakpoints(qlr, alhpa = 0.05)
+plot(qlr, alpha = 0.05, main = "F Statistics")
+lines(breakpoints(qlr))
+
+
+```
+
+# ARIMA
+
+```{r}
+#  after first difference 
+ACF_fd <- data_dif %>%
+  ACF(change_dif, lag_max = 48) %>%
+  autoplot() + labs(title = "ACF first difference")
+PACF_fd <- data_dif %>%
+  PACF(change_dif, lag_max = 48) %>%
+  autoplot() + labs(title = "PACF first difference")
+plot_grid(ACF_fd, PACF_fd, ncol=1)
+```
+
+### Split
+
+```{r}
+train <- data %>%
+  filter_index("2000 Jan" ~ "2018 Jan")
+test <- data %>%
+  filter_index("2018 Feb" ~ .)
+
+```
+
+# Models
+
+```{r}
+models <- train %>%
+  model(
+    # ETS
+    # auto.ets.ANA = ETS(change), ## A N A
+    ets.ANN = ETS(change ~ error("A") + trend("N") + season("N")), # 
+    # ets.AAN = ETS(change ~ error("A") + trend("A") + season("N")), #
+    ets.AAA = ETS(change ~ error("A") + trend("A") + season("A")), # 
+
+    # ARIMA
+    #auto.arima.113000 = ARIMA(change),
+    arima.113101 = ARIMA(change ~ 0 + pdq(1,1,3) + PDQ(1,0,1)),
+    #arima.311000 = ARIMA(change ~ 0 + pdq(3,1,1) + PDQ(0,0,0)),
+    #arima.311101 = ARIMA(change ~ 0 + pdq(3,1,1) + PDQ(1,0,1)),
+    #arima.313000 = ARIMA(change ~ 0 + pdq(3,1,3) + PDQ(0,0,0)),
+    #arima.313101 = ARIMA(change ~ 0 + pdq(3,1,3) + PDQ(1,0,1)),
+    #arima.312000 = ARIMA(change ~ 0 + pdq(3,1,2) + PDQ(0,0,0)),
+    #arima.312101 = ARIMA(change ~ 0 + pdq(3,1,2) + PDQ(1,0,1)),
+  )
+
+report(models)
+
+models %>%
+  select(arima.311101) %>%
+  gg_tsresiduals(type = "innovation")
+
+models %>%
+  select(ets.ANN) %>%
+  gg_tsresiduals(type = "innovation")
+
+models %>%
+  select(ets.AAA) %>%
+  gg_tsresiduals(type = "innovation")
+
+models %>%
+  select(arima.311101) %>%
+  gg_tsresiduals(type = "innovation")
+
+models %>%
+  select(ets.ANN) %>%
+  residuals()  %>%
+  features(.resid, features = ljung_box, lag = 12, dof = 4)
+
+models %>%
+  select(ets.AAA) %>%
+  residuals()  %>%
+  features(.resid, features = ljung_box, lag = 12, dof = 4)
+
+models %>%
+  select(arima.113101) %>%
+  residuals()  %>%
+  features(.resid, features = ljung_box, lag = 12, dof = 4)
+
+  
+```
+
+# Forecast
+
+```{r}
+# Forecast Auto ETS on test set
+plot.1 <- models %>%
+  select(auto.ets) %>%
+  forecast(test) %>%
+  autoplot(train) +
+  labs(title = "Auto ETS model")
+print(plot.1)
+
+# Forecast own ETS on test set
+plot.2 <- models %>%
+  select(my.ets1) %>%
+  forecast(test) %>%
+  autoplot(train) +
+  labs(title = "Guessed ETS model")
+print(plot.2)
+
+# Forecast own ETS on test set
+plot.3 <- models %>%
+  select(my.ets2) %>%
+  forecast(test) %>%
+  autoplot(train) +
+  labs(title = "Guessed ETS model")
+print(plot.3)
+
+# Forecast own ETS on test set
+plot.4 <- models %>%
+  select(my.ets3) %>%
+  forecast(test) %>%
+  autoplot(train) +
+  labs(title = "Guessed ETS model")
+print(plot.4)
+
+
+# Forecast own ETS on test set
+plot.6 <- models %>%
+  select(auto.arima) %>%
+  forecast(test) %>%
+  autoplot(data) +
+  labs(title = "Guessed ETS model")
+print(plot.6)
+
+# Forecast own ETS on test set
+plot.7 <- models %>%
+  select(my.arima1) %>%
+  forecast(test) %>%
+  autoplot(data) +
+  labs(title = "Guessed ETS model")
+print(plot.7)
+
+# Forecast own ETS on test set
+plot.8<- models %>%
+  select(my.arima2) %>%
+  forecast(test) %>%
+  autoplot(data) +
+  labs(title = "Guessed ETS model")
+print(plot.8)
+
+
+
+```
+
+```{r}
+models %>%
+  # select(auto.ets.ANA, ets.AAA, auto.arima)%>%
+  # select(auto.arima.113, arima.313000, arima.111101, arima.311101)%>%
+  # select(arima.113101, auto.arima.113000, arima.313101, arima.312000, arima.312101)%>%
+  select(ets.ANN, arima.113101)%>%
+  forecast(h = nrow(test)) %>%
+  autoplot(train %>% filter_index("2016 Jan" ~ .), level=NULL) +
+  geom_line(data=test, aes(y=change),col="gray") + labs(title="Forecast") +
+  guides(color = guide_legend(title="Forecast"))
+
+```
+
+```{r}
+data_sub <- data%>%
+  filter_index("1950 Jan" ~ .)
+
+arima_plot <- models %>%
+  select(arima.113101) %>%
+  forecast(test) %>%
+  autoplot(data_sub, color = "blue") +
+  labs(title = "Arima(1,1,3)(1,0,1)")
+print(arima_plot)
+
+ets1.plot <- models %>%
+  select(ets.ANN) %>%
+  forecast(test) %>%
+  autoplot(data_sub, color = "blue") +
+  labs(title = "ETS(A,N,N)")
+print(ets1.plot)
+
+ets2.plot <- models %>%
+  select(ets.AAA) %>%
+  forecast(test) %>%
+  autoplot(data_sub, color = "blue") +
+  labs(title = "ETS(A,A,A)")+
+  theme(axis.text.y = element_text(size = rel(0.5)))
+print(ets2.plot)
+
+models %>%
+  forecast(test) %>%
+  autoplot(data_sub,level = NULL)
+
+```
+
+```{r}
+
+models %>%
+  forecast(test) %>%
+  accuracy(data)
+
+models %>%
+  forecast(train) %>%
+  accuracy(data)
+
+accuracy(models$auto.ets)
+AIC_ets = ets(train, ic = "aic" , allow.multiplicative.trend = TRUE, "AAdA")
+ETS
+```
+
+```{r}
+data_sub <- data%>%
+  filter_index("1980 Jan" ~ .)
+
+best_model <- data %>%
+  model(arima_f = ARIMA(change ~ 0 + pdq(1,1,3) + PDQ(1,0,1)))
+
+arima_future_plot <- best_model %>%
+  dplyr::select(arima_f) %>%
+  forecast(h=36) %>%
+  autoplot(data_sub %>% filter_index("1990 Jan" ~ .)) +
+  labs(title = "Forecasts from ARIMA model")
+arima_future_plot 
+```
